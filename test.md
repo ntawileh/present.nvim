@@ -1,13 +1,13 @@
-# this is a title_pos
+# this is a title
 
-yo ho show
+yo ho ho
 
 # another slide
 
-set_window_buffer
+another slide content
 
 ```
-something
+this code block has no language specified
 ```
 
 ```json
@@ -21,7 +21,7 @@ something
 - something
 - something else
 
-# code slide
+# lua code slide
 
 ```lua
 print("hello world")
@@ -37,7 +37,6 @@ console.log("hello world js");
 
 ```python
 import time
-time.sleep(5)
 print("hello world python");
 ```
 

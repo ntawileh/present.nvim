@@ -6,6 +6,11 @@ local M = {}
 ---@class present.Slide
 ---@field title string: The title of the slide
 ---@field body string[]: The body of the slide
+---@field blocks present.Block[]: A code block inside of a slide
+---
+---@class present.Block
+---@field language string: The language of the block
+---@field body string: The body of the code block
 ---
 ---@class present.Windows
 ---@field title snacks.win: The title window
@@ -22,10 +27,80 @@ local state = {
   footer = "",
   ---@type string
   name = "",
+  ---@type boolean
+  show_help = false,
 }
 
-M.setup = function()
-  -- nothing
+---@param program string: The binary to run
+---@return fun(present.Block): string[]
+M.create_system_executor = function(program)
+  ---@param block present.Block: The block to execute
+  return function(block)
+    local tempfile = vim.fn.tempname()
+    vim.fn.writefile(vim.split(block.body, "\n"), tempfile)
+    local result = vim.system({ program, tempfile }, { text = true }):wait()
+    return vim.split(result.stdout, "\n")
+  end
+end
+
+--- Default executor for Rust code
+---@param block present.Block
+local execute_rust_code = function(block)
+  local tempfile = vim.fn.tempname() .. ".rs"
+  local outputfile = tempfile:sub(1, -4)
+  vim.fn.writefile(vim.split(block.body, "\n"), tempfile)
+  local result = vim.system({ "rustc", tempfile, "-o", outputfile }, { text = true }):wait()
+  if result.code ~= 0 then
+    local output = vim.split(result.stderr, "\n")
+    return output
+  end
+  result = vim.system({ outputfile }, { text = true }):wait()
+  return vim.split(result.stdout, "\n")
+end
+
+---@param block present.Block: The block to execute
+---@return string[]: The output of the code block
+local function execute_lua_code(block)
+  local original_print = print
+  local output = { "" }
+
+  ---@diagnostic disable-next-line: missing-global-doc
+  print = function(...)
+    local args = { ... }
+    local message = table.concat(vim.tbl_map(tostring, args), "\t")
+    table.insert(output, message)
+  end
+
+  local chunk = loadstring(block.body)
+  pcall(function()
+    if not chunk then
+      table.insert(output, "Error: Could not load code chunk")
+      return
+    end
+    chunk()
+  end)
+  print = original_print
+  return output
+end
+
+local options = {
+  ---@type table<string, fun(present.Block): string[]>
+  executors = {
+    lua = execute_lua_code,
+    javascript = M.create_system_executor("node"),
+    python = M.create_system_executor("python3"),
+    rust = execute_rust_code,
+  },
+}
+M.setup = function(opts)
+  opts = opts or {}
+  opts.executors = opts.executors or {}
+
+  opts.executors.lua = opts.executors.lua or execute_lua_code
+  opts.executors.javascript = opts.executors.javascript or M.create_system_executor("node")
+  opts.executors.python = opts.executors.python or M.create_system_executor("python3")
+  opts.executors.rust = opts.executors.rust or execute_rust_code
+  options = opts
 end
 
 ---@param title string: The title to pad
@@ -62,7 +137,7 @@ local function create_floating_window(opts)
     text = opts.text,
     title = opts.title or "",
     title_pos = "center",
-    footer_pos = "left",
+    footer_pos = opts.footer_pos or "left",
     fixbuf = true,
     keys = opts.keys or {},
     actions = opts.actions or {},
@@ -94,11 +169,15 @@ end
 ---@param lines string[]: The lines in the buffer
 ---@return present.Slides: The slides
 local parse_slides = function(lines)
-  local slides = { slides = {} }
+  local slides = {
+    ---@type present.Slide[]
+    slides = {},
+  }
   ---@type present.Slide
   local current_slide = {
     title = "",
     body = {},
+    blocks = {},
   }
 
   local separator = "^#"
@@ -111,6 +190,7 @@ local parse_slides = function(lines)
       current_slide = {
         title = line,
         body = {},
+        blocks = {},
       }
     else
       table.insert(current_slide.body, line)
@@ -118,6 +198,32 @@ local parse_slides = function(lines)
   end
 
   table.insert(slides.slides, current_slide)
+
+  for _, slide in ipairs(slides.slides) do
+    ---@type present.Block | {}
+    local block = {
+      language = "",
+      body = "",
+    }
+    local inside_block = false
+    for _, line in ipairs(slide.body) do
+      if vim.startswith(vim.trim(line), "```") then
+        if not inside_block then
+          inside_block = true
+          block.language = string.sub(line, 4)
+        else
+          inside_block = false
+          block.body = vim.trim(block.body)
+          table.insert(slide.blocks, block)
+          block = { language = "", body = "" }
+        end
+      else
+        if inside_block then
+          block.body = block.body .. line .. "\n"
+        end
+      end
+    end
+  end
 
   return slides
 end
@@ -163,13 +269,55 @@ end
 ---@param total_slides number: The total number of slides
 ---@return string: The footer string
 local function make_footer(current_slide, total_slides)
-  local command_help = "n: next slide, p: previous slide, q: quit"
-  return state.name .. " | " .. tostring(current_slide) .. "/" .. tostring(total_slides)
+  return state.name .. " | " .. tostring(current_slide) .. "/" .. tostring(total_slides) .. " | (?) help"
 end
 
 local function open_current_slide()
-  state.footer = make_footer(state.current_slide, #state.parsed.slides)
+  local command_help = "n: next slide, p: previous slide, X: execute code block, q: quit"
+  state.footer = state.show_help and command_help or make_footer(state.current_slide, #state.parsed.slides)
   set_slide_content(state.windows, state.parsed.slides[state.current_slide], state.footer)
+end
+
+---@param block present.Block: The block to execute
+local function execute_block(block)
+  local slide = state.parsed.slides[state.current_slide]
+  local executor = options.executors[block.language]
+  local output = { "", "# Code", "```" .. block.language }
+  vim.list_extend(output, vim.split(block.body, "\n"))
+  table.insert(output, "```")
+
+  table.insert(output, "")
+  table.insert(output, "# Output ")
+  table.insert(output, "")
+
+  local temp_height = math.floor(vim.o.lines * 0.6)
+  local temp_width = math.floor(vim.o.columns * 0.6)
+
+  local code_window = create_floating_window({
+    style = "minimal",
+    title = block.language,
+    width = temp_width,
+    height = temp_height,
+    row = math.floor((vim.o.lines - temp_height) / 2),
+    col = math.floor((vim.o.columns - temp_width) / 2),
+    border = "rounded",
+    footer = "q: close",
+    footer_pos = "center",
+    text = "Executing...",
+  })
+
+  if not executor then
+    table.insert(
+      output,
+      block.language ~= "" and "No code executor for " .. block.language .. ""
+        or "Code block does not specify a language.  Nothing to execute."
+    )
+  else
+    table.insert(output, "```")
+    vim.list_extend(output, executor(block))
+    table.insert(output, "```")
+  end
+  set_window_content(code_window.buf, output)
 end
 
 M.start_presentation = function(opts)
@@ -201,8 +349,33 @@ M.start_presentation = function(opts)
   end)
 
   present_keymap("n", "?", function()
-    local command_help = "n: next slide, p: previous slide, q: quit"
-    vim.print(command_help)
+    state.show_help = not state.show_help
+    open_current_slide()
+  end)
+
+  present_keymap("n", "X", function()
+    local slide = state.parsed.slides[state.current_slide]
+    local block = slide.blocks[1]
+    if not block then
+      print("No code block found")
+      return
+    end
+
+    if #slide.blocks == 1 then
+      execute_block(block)
+      return
+    end
+
+    vim.ui.select(slide.blocks, {
+      prompt = "Select code block to execute: ",
+      format_item = function(b)
+        return b.language .. " "
+      end,
+    }, function(b)
+      if b then
+        execute_block(b)
+      end
+    end)
   end)
 
   vim.api.nvim_create_autocmd("VimResized", {
@@ -224,7 +397,7 @@ M.start_presentation = function(opts)
   })
 end
 
--- M.start_presentation({ bufnr = 6 })
+M.start_presentation({ bufnr = 11 })
 -- vim.print(parse_slides({
 --   "# Slide 1",
 --   "something in slide 1",

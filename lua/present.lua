@@ -27,8 +27,8 @@ local state = {
   footer = "",
   ---@type string
   name = "",
-  ---@type boolean
-  show_help = false,
+  ---@type number
+  new_slide_on_header_level = 1,
 }
 
 ---@param program string: The binary to run
@@ -167,8 +167,10 @@ end
 
 --- Takes some lines and parses them in to slides
 ---@param lines string[]: The lines in the buffer
+---@param sep string: The separator to use
 ---@return present.Slides: The slides
-local parse_slides = function(lines)
+local parse_slides = function(lines, sep)
+  sep = sep or "#"
   local slides = {
     ---@type present.Slide[]
     slides = {},
@@ -180,7 +182,7 @@ local parse_slides = function(lines)
     blocks = {},
   }
 
-  local separator = "^#"
+  local separator = "^" .. sep .. " "
 
   for _, line in ipairs(lines) do
     if line:find(separator) then
@@ -273,14 +275,12 @@ local function make_footer(current_slide, total_slides)
 end
 
 local function open_current_slide()
-  local command_help = "n: next slide, p: previous slide, X: execute code block, q: quit"
-  state.footer = state.show_help and command_help or make_footer(state.current_slide, #state.parsed.slides)
+  state.footer = make_footer(state.current_slide, #state.parsed.slides)
   set_slide_content(state.windows, state.parsed.slides[state.current_slide], state.footer)
 end
 
 ---@param block present.Block: The block to execute
 local function execute_block(block)
-  local slide = state.parsed.slides[state.current_slide]
   local executor = options.executors[block.language]
   local output = { "", "# Code", "```" .. block.language }
   vim.list_extend(output, vim.split(block.body, "\n"))
@@ -325,13 +325,27 @@ M.start_presentation = function(opts)
   opts.bufnr = opts.bufnr or 0
   local lines = vim.api.nvim_buf_get_lines(opts.bufnr, 0, -1, false)
   state.name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(opts.bufnr), ":t")
-  state.parsed = parse_slides(lines)
+  state.parsed = parse_slides(lines, "#")
   state.windows = make_floating_windows()
 
   state.windows.body:add_padding()
 
   state.current_slide = 1
   open_current_slide()
+
+  present_keymap("n", "h", function()
+    state.new_slide_on_header_level = math.min(state.new_slide_on_header_level + 1, 5)
+    state.parsed = parse_slides(lines, string.rep("#", state.new_slide_on_header_level))
+    state.current_slide = 1
+    open_current_slide()
+  end)
+
+  present_keymap("n", "H", function()
+    state.new_slide_on_header_level = math.max(state.new_slide_on_header_level - 1, 1)
+    state.parsed = parse_slides(lines, string.rep("#", state.new_slide_on_header_level))
+    state.current_slide = 1
+    open_current_slide()
+  end)
 
   present_keymap("n", "n", function()
     state.current_slide = math.min(state.current_slide + 1, #state.parsed.slides)
@@ -349,8 +363,28 @@ M.start_presentation = function(opts)
   end)
 
   present_keymap("n", "?", function()
-    state.show_help = not state.show_help
-    open_current_slide()
+    local command_help = {
+      "n: next slide",
+      "p: previous slide",
+      "X: execute code block",
+      "q: quit",
+      "h: increase header level to split on (h1, h2, h3...)",
+      "H: decrease header level to split on (h3, h2, h1...)",
+      "",
+      "q to close this help window",
+    }
+    create_floating_window({
+      style = "minimal",
+      title = "Present Help",
+      width = math.floor(vim.o.columns * 0.6),
+      height = math.floor(vim.o.lines * 0.6),
+      row = math.floor((vim.o.lines - math.floor(vim.o.lines * 0.6)) / 2),
+      col = math.floor((vim.o.columns - math.floor(vim.o.columns * 0.6)) / 2),
+      border = "rounded",
+      footer = "q: close",
+      footer_pos = "center",
+      text = command_help,
+    })
   end)
 
   present_keymap("n", "X", function()
@@ -397,7 +431,7 @@ M.start_presentation = function(opts)
   })
 end
 
-M.start_presentation({ bufnr = 11 })
+-- M.start_presentation({ bufnr = 6 })
 -- vim.print(parse_slides({
 --   "# Slide 1",
 --   "something in slide 1",

@@ -183,9 +183,14 @@ local parse_slides = function(lines, sep)
   }
 
   local separator = "^" .. sep .. " "
+  local inside_code_block = false
 
   for _, line in ipairs(lines) do
-    if line:find(separator) then
+    if vim.startswith(vim.trim(line), "```") then
+      inside_code_block = not inside_code_block
+    end
+
+    if line:find(separator) and not inside_code_block then
       if #current_slide.title > 0 then
         table.insert(slides.slides, current_slide)
       end

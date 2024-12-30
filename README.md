@@ -12,7 +12,7 @@ A plugin for presenting markdown content in Neovim.
 
 ```lua
 {
-    'ntawileh/present.nvim'
+    'ntawileh/present.nvim',
      dependencies = { "folke/snacks.nvim" },
 }
 ```
